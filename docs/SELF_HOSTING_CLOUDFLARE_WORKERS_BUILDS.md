@@ -14,16 +14,16 @@ truth for these settings; this file records what they are and why.
 
 `Compute` -> `Workers & Pages` -> your Worker -> `Settings` -> `Build`.
 
-| Field                                | Value                                                                 |
-| ------------------------------------ | --------------------------------------------------------------------- |
-| Git account                          | `felipewilliam2`                                                      |
-| Repository                           | `open-seo`                                                            |
-| Production branch                    | `main`                                                                |
-| Builds for non-production branches   | on                                                                    |
-| Build command                        | `pnpm run build`                                                      |
-| Deploy command                       | `npx wrangler d1 migrations apply DB --remote && npx wrangler deploy` |
-| Non-production branch deploy command | `npx wrangler versions upload`                                        |
-| Root directory                       | repo root (default)                                                   |
+| Field                                | Value                                                                                                                             |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| Git account                          | `felipewilliam2`                                                                                                                  |
+| Repository                           | `open-seo`                                                                                                                        |
+| Production branch                    | `main`                                                                                                                            |
+| Builds for non-production branches   | on                                                                                                                                |
+| Build command                        | `pnpm run build`                                                                                                                  |
+| Deploy command                       | `npx wrangler d1 migrations apply DB --remote && npx wrangler deploy -c dist/open_seo_audit/wrangler.json && npx wrangler deploy` |
+| Non-production branch deploy command | `npx wrangler versions upload`                                                                                                    |
+| Root directory                       | repo root (default)                                                                                                               |
 
 Nothing goes in `Build variables`. The heap bump the SSR build needs already
 comes from `.npmrc` (`node-options=--max-old-space-size=4096`), and `AUTH_MODE`
@@ -35,7 +35,7 @@ the schema is `.catch("cloudflare_access")`. An unset auth mode fails closed.
 `package.json`'s `deploy` script is three steps:
 
 ```
-db:migrate:prod && build && wrangler deploy
+db:migrate:prod && build && wrangler deploy -c dist/open_seo_audit/wrangler.json && wrangler deploy
 ```
 
 Workers Builds splits build and deploy into separate fields, so a deploy command
@@ -49,6 +49,23 @@ have D1 edit permission (`Advanced settings` -> `API Token`).
 
 The migration step is idempotent: `wrangler d1 migrations apply` compares
 `drizzle/` against the `d1_migrations` table and is a no-op when they match.
+
+## Why the deploy command deploys two workers
+
+Since upstream v0.1.x the site-audit engine runs in a second worker,
+`open-seo-audit` (`wrangler.audit.jsonc`). `pnpm run build` emits its config
+at `dist/open_seo_audit/wrangler.json`. The main worker binds to it by name
+(`AUDIT_ENGINE` service, `SITE_AUDIT_WORKFLOW` cross-script workflow), so the
+audit worker must be deployed first — a plain `npx wrangler deploy` fails
+while `open-seo-audit` does not exist in the account.
+
+`wrangler.audit.jsonc` carries the same `-anhanga` resource ids as
+`wrangler.jsonc`; keep them in sync. The audit worker needs its own
+DataForSEO secret, set once:
+
+```bash
+pnpm exec wrangler secret put DATAFORSEO_API_KEY --name open-seo-audit
+```
 
 ## Why non-production branches upload instead of deploy
 
@@ -130,11 +147,12 @@ diverges:
 | file                                             | conflict risk                            |
 | ------------------------------------------------ | ---------------------------------------- |
 | `wrangler.jsonc`                                 | when upstream edits the bindings block   |
+| `wrangler.audit.jsonc`                           | when upstream edits the bindings block   |
 | `docs/SELF_HOSTING_CLOUDFLARE_WORKERS_BUILDS.md` | none — upstream has no such file         |
 | `.github/workflows/sync-upstream.yml`            | none — same                              |
 | `.agents/PAPERCUTS.md`                           | low — an added line at the top of `Open` |
 
-On a `wrangler.jsonc` conflict, keep this account's resource ids (the
+On a `wrangler.jsonc` or `wrangler.audit.jsonc` conflict, keep this account's resource ids (the
 `-anhanga` ones) and take upstream's other changes.
 
 Do not re-add a fork-local version bump or a `release-notes/vX.Y.Z.md`. Both
