@@ -14,16 +14,16 @@ truth for these settings; this file records what they are and why.
 
 `Compute` -> `Workers & Pages` -> your Worker -> `Settings` -> `Build`.
 
-| Field                                | Value                                                                                                                             |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| Git account                          | `felipewilliam2`                                                                                                                  |
-| Repository                           | `open-seo`                                                                                                                        |
-| Production branch                    | `main`                                                                                                                            |
-| Builds for non-production branches   | on                                                                                                                                |
-| Build command                        | `pnpm run build`                                                                                                                  |
-| Deploy command                       | `npx wrangler d1 migrations apply DB --remote && npx wrangler deploy -c dist/open_seo_audit/wrangler.json && npx wrangler deploy` |
-| Non-production branch deploy command | `npx wrangler versions upload`                                                                                                    |
-| Root directory                       | repo root (default)                                                                                                               |
+| Field                                | Value                                                                                                                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Git account                          | `felipewilliam2`                                                                                                                                                                            |
+| Repository                           | `open-seo`                                                                                                                                                                                  |
+| Production branch                    | `main`                                                                                                                                                                                      |
+| Builds for non-production branches   | on                                                                                                                                                                                          |
+| Build command                        | `pnpm run build`                                                                                                                                                                            |
+| Deploy command                       | `npx wrangler d1 migrations apply DB --remote && env -u WRANGLER_CI_OVERRIDE_NAME -u WRANGLER_CI_MATCH_TAG npx wrangler deploy -c dist/open_seo_audit/wrangler.json && npx wrangler deploy` |
+| Non-production branch deploy command | `npx wrangler versions upload`                                                                                                                                                              |
+| Root directory                       | repo root (default)                                                                                                                                                                         |
 
 Nothing goes in `Build variables`. The heap bump the SSR build needs already
 comes from `.npmrc` (`node-options=--max-old-space-size=4096`), and `AUTH_MODE`
@@ -48,7 +48,7 @@ Applying migrations from the deploy command requires the build's API token to
 have D1 edit permission (`Advanced settings` -> `API Token`).
 
 The migration step is idempotent: `wrangler d1 migrations apply` compares
-`drizzle/` against the `d1_migrations` table and is a no-op when they match.
+`drizzle/sqlite/` against the `d1_migrations` table and is a no-op when they match.
 
 ## Why the deploy command deploys two workers
 
@@ -58,6 +58,22 @@ at `dist/open_seo_audit/wrangler.json`. The main worker binds to it by name
 (`AUDIT_ENGINE` service, `SITE_AUDIT_WORKFLOW` cross-script workflow), so the
 audit worker must be deployed first — a plain `npx wrangler deploy` fails
 while `open-seo-audit` does not exist in the account.
+
+The audit deploy has to run under `env -u WRANGLER_CI_OVERRIDE_NAME -u
+WRANGLER_CI_MATCH_TAG`. Workers Builds sets both variables for the Worker the
+build is connected to (`open-seo`):
+
+- `WRANGLER_CI_OVERRIDE_NAME=open-seo` makes every `wrangler deploy` in the
+  build replace the config's `name` with `open-seo`. Without the unset, the
+  audit bundle is uploaded onto the main Worker. The log shows `Failed to match
+Worker name ... Overriding using the CI provided Worker name`, and the upload
+  then fails with `Cannot apply new-sqlite-class migration to class
+'AuditScratchpad'` (code 10074).
+- `WRANGLER_CI_MATCH_TAG` makes wrangler check that the target script is the
+  connected Worker, which `open-seo-audit` is not.
+
+The final `npx wrangler deploy` keeps both variables, so the main Worker still
+deploys as the connected one.
 
 `wrangler.audit.jsonc` carries the same `-anhanga` resource ids as
 `wrangler.jsonc`; keep them in sync. The audit worker needs its own
