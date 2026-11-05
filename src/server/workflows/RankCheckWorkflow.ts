@@ -6,24 +6,23 @@ import {
 import { NonRetryableError } from "cloudflare:workflows";
 import { withPgClient } from "@/db";
 import { yieldingStep } from "@/server/workflows/yieldingStep";
-import type { BillingCustomerContext } from "@/server/billing/subscription";
+import {
+  getUsageCreditsRemaining,
+  type BillingCustomerContext,
+} from "@/server/billing/subscription";
 import { RankTrackingRepository } from "@/server/features/rank-tracking/repositories/RankTrackingRepository";
 import { failRunIfActive } from "@/server/features/rank-tracking/services/rankCheckRunGuards";
+import { runQueuedCheck } from "@/server/workflows/rankCheckPaths";
 import {
-  runLiveCheck,
-  runQueuedCheck,
-} from "@/server/workflows/rankCheckPaths";
-import { retryRankChecks } from "@/server/workflows/rankCheckRetries";
+  READ_WINDOW_MS,
+  retryRankChecks,
+} from "@/server/workflows/rankCheckRetries";
+import { resolveRunGotoUrls } from "@/server/workflows/rankCheckGotoUrls";
 import { pgStep } from "@/server/workflows/pgStep";
 import { createDataforseoClient } from "@/server/lib/dataforseo";
 import { captureServerEvent } from "@/server/lib/posthog";
 import { sendCreditsExhaustedEvent } from "@/server/email/onboarding-drip";
 import { describeError } from "@/server/lib/errors";
-import { autumn } from "@/server/billing/autumn";
-import {
-  AUTUMN_SEO_DATA_BALANCE_FEATURE_ID,
-  AUTUMN_SEO_DATA_TOPUP_BALANCE_FEATURE_ID,
-} from "@/shared/billing";
 import {
   estimateRankCheckCredits,
   rankCheckCostApprovalError,
@@ -98,7 +97,6 @@ async function prepareRankCheckKeywords(input: {
     trackingKeywords.map((kw) => kw.keyword),
     input.devices,
     input.serpDepth,
-    input.trigger === "scheduled" ? "queued" : "live",
   );
   if (input.maxCostCredits != null && costCredits > input.maxCostCredits) {
     throw new NonRetryableError(
@@ -107,25 +105,20 @@ async function prepareRankCheckKeywords(input: {
   }
 
   // Verify the user has enough credits for the full check before starting.
-  // Scheduled checks go through the cheaper task queue, so estimate at queued
-  // pricing — a live-price estimate would skip checks the user can afford.
-  // The estimate is the worst case, so it covers every retry.
+  // The estimate is the worst case, so it covers every read.
+  // A timed-out Autumn read throws here instead of reading as 0 credits, so
+  // the step retries it rather than refusing a customer who has credits.
   if (await isHostedServerAuthMode()) {
-    const [monthlyCheck, topupCheck] = await Promise.all([
-      autumn.check({
-        customerId: input.billingCustomer.organizationId,
-        featureId: AUTUMN_SEO_DATA_BALANCE_FEATURE_ID,
-      }),
-      autumn.check({
-        customerId: input.billingCustomer.organizationId,
-        featureId: AUTUMN_SEO_DATA_TOPUP_BALANCE_FEATURE_ID,
-      }),
-    ]);
-    const available =
-      (monthlyCheck.balance?.remaining ?? 0) +
-      (topupCheck.balance?.remaining ?? 0);
+    const credits = await getUsageCreditsRemaining(
+      input.billingCustomer.organizationId,
+    );
+    const available = credits.monthlyRemaining + credits.topupRemaining;
     if (available < costCredits) {
-      await sendCreditsExhaustedEvent(input.billingCustomer);
+      // A spent auto-reload budget is not running out: the credits are there,
+      // only held back.
+      if (!credits.topupBudgetReached) {
+        await sendCreditsExhaustedEvent(input.billingCustomer);
+      }
       // The code alone, so the run's saved error shows the credits card.
       throw new NonRetryableError("INSUFFICIENT_CREDITS");
     }
@@ -140,6 +133,7 @@ async function prepareRankCheckKeywords(input: {
       id: kw.id,
       keyword: kw.keyword,
     })),
+    readsEndAt: Date.now() + READ_WINDOW_MS,
   };
 }
 
@@ -150,6 +144,7 @@ async function finalizeRankCheckRun(input: {
   billingCustomer: BillingCustomerContext;
   trigger: RankCheckParams["trigger"];
   devices: RankCheckParams["devices"];
+  keywords: Array<{ id: string; keyword: string }>;
   batchError: string | null;
 }) {
   // If stale-cleanup already marked our run failed, don't overwrite that
@@ -187,9 +182,6 @@ async function finalizeRankCheckRun(input: {
   const keywordsTotal = run.keywordsTotal || keywordsChecked;
   const isPartial = checkedByDevice.some((d) => d.count < keywordsTotal);
 
-  // Batch steps record the first per-keyword rejection on the run as it
-  // happens, so a failed run shows the vendor's reason rather than a count.
-  const keywordError = run.errorMessage ?? input.batchError;
   const status =
     keywordsChecked === 0 && keywordsTotal > 0 ? "failed" : "completed";
   const checkedSummary =
@@ -200,9 +192,14 @@ async function finalizeRankCheckRun(input: {
       : `${keywordsChecked} of ${keywordsTotal}`;
   const errorMessage =
     status === "failed"
-      ? (keywordError ?? "No keywords could be checked.")
+      ? (input.batchError ?? "No keywords could be checked.")
       : isPartial
-        ? `Checked ${checkedSummary} keyword(s)${keywordError ? `: ${keywordError}` : ""}`
+        ? [
+            `Checked ${checkedSummary} keyword(s).`,
+            describeUnchecked(input.keywords, devices, snapshots),
+          ]
+            .filter(Boolean)
+            .join(" ")
         : null;
 
   // Flipping status away from 'pending'/'running' is what releases the
@@ -246,6 +243,32 @@ async function finalizeRankCheckRun(input: {
     },
   });
 }
+
+/** Names a partial run's unchecked keywords, so users see which ones failed. */
+function describeUnchecked(
+  keywords: Array<{ id: string; keyword: string }>,
+  devices: Array<"desktop" | "mobile">,
+  snapshots: Array<{ trackingKeywordId: string; device: string }>,
+) {
+  const checked = new Set(
+    snapshots.map((s) => `${s.trackingKeywordId}:${s.device}`),
+  );
+  const unchecked = keywords.flatMap((kw) => {
+    const missing = devices.filter((d) => !checked.has(`${kw.id}:${d}`));
+    if (missing.length === 0) return [];
+    // Name the device only when the other one got a result.
+    return missing.length < devices.length
+      ? [`"${kw.keyword}" (${missing[0]})`]
+      : [`"${kw.keyword}"`];
+  });
+  if (unchecked.length === 0) return "";
+  const shown = unchecked.slice(0, UNCHECKED_KEYWORDS_SHOWN).join(", ");
+  const more = unchecked.length - UNCHECKED_KEYWORDS_SHOWN;
+  return `Not checked: ${shown}${more > 0 ? ` and ${more} more` : ""}.`;
+}
+
+/** Keeps a partial run's message readable on a large tracker. */
+const UNCHECKED_KEYWORDS_SHOWN = 10;
 
 async function markRankCheckRunFailed(input: {
   runId: string;
@@ -373,20 +396,30 @@ export class RankCheckWorkflow extends WorkflowEntrypoint<
           locationName,
           runId,
         };
-        // Scheduled checks use DataForSEO's task queue (~30% of live cost);
-        // manual checks stay on the live endpoint for instant results.
-        // Retries always go through the queue.
-        if (trigger === "scheduled") {
-          await runQueuedCheck(step, checkContext);
-        } else {
-          await runLiveCheck(step, checkContext);
-        }
-        await retryRankChecks(step, checkContext, configId, trigger);
+        await runQueuedCheck(step, checkContext);
+        await retryRankChecks(
+          step,
+          checkContext,
+          configId,
+          prepareResult.readsEndAt,
+        );
       } catch (error) {
         // Batch failure — snapshots for completed batches are already
         // persisted incrementally. Continue to finalization.
         batchError = error instanceof Error ? error.message : String(error);
         console.warn(`[rank-check] ${runId} partial failure: ${batchError}`);
+      }
+
+      try {
+        await pgStep(step, "resolve-goto-urls", FREE_STEP_CONFIG, () =>
+          resolveRunGotoUrls(runId),
+        );
+      } catch (error) {
+        // The positions are saved and the goto links still work, so this
+        // doesn't fail the run.
+        console.warn(
+          `[rank-check] ${runId} goto URLs not resolved: ${describeError(error)}`,
+        );
       }
 
       await pgStep(step, "finalize", FREE_STEP_CONFIG, async () =>
@@ -397,6 +430,7 @@ export class RankCheckWorkflow extends WorkflowEntrypoint<
           billingCustomer,
           trigger,
           devices,
+          keywords,
           batchError,
         }),
       );
