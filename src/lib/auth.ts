@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- the one Better Auth configuration: every hook and plugin lives here */
 import { env } from "cloudflare:workers";
 import { betterAuth } from "better-auth";
 import {
@@ -29,7 +30,11 @@ import { onInvitationAccepted } from "@/server/auth/invited-member";
 import { AuthRepository } from "@/server/auth/repositories/AuthRepository";
 import { assertStandaloneSignUpOpen } from "@/server/standalone/sign-up";
 import { captureDubReferralSignup } from "@/server/referrals/dub";
-import { captureMetaSignup } from "@/server/referrals/meta";
+import {
+  captureMetaSetupStep,
+  captureMetaSignup,
+  MetaSetupEvent,
+} from "@/server/referrals/meta";
 import {
   captureSignUpCompleted,
   saveSignUpCampaign,
@@ -39,6 +44,8 @@ import {
   requestPrivacyChoices,
 } from "@/shared/privacy-choices";
 import { markMcpConnected } from "@/server/features/activation/mcpActivation";
+import { assertNotScheduledForDeletion } from "@/server/account-deletion/signInBlock";
+import { claimGuestFromCookie } from "@/server/auth/guest-accounts";
 import {
   sendHostedPasswordResetEmail,
   sendHostedVerificationEmail,
@@ -307,6 +314,11 @@ function createAuth() {
           userEmail: user.email,
           organizationId: metadata.organizationId,
         });
+        await captureMetaSetupStep(
+          MetaSetupEvent.AgentConnected,
+          metadata.organizationId,
+          ctx.request,
+        );
       }),
     },
     databaseHooks: {
@@ -366,15 +378,21 @@ function createAuth() {
       },
       session: {
         create: {
-          before: async (session) => {
-            // Runs on every sign-in (each sign-in mints a session row).
-            // Resolution order: last-active org while still a member → most
-            // recently joined org → newly created default organization —
-            // except that a membership-less user with a pending invitation
-            // gets no organization minted (null active org) so accepting the invite
-            // leaves them in exactly the inviter's org. Inject Better Auth's
-            // createOrganization so the helper can stay reusable without
-            // importing auth.ts and creating a cycle.
+          before: async (session, ctx) => {
+            // Runs on every sign-in (each sign-in mints a session row). Refuses
+            // an account waiting to be deleted, claims a guest account whose
+            // claim link this browser opened (its org then counts as a
+            // membership below), then resolves the active org:
+            // last-active org while still a member → most recently joined → a
+            // new default one — except a membership-less user with a pending
+            // invitation gets none (null active org), so accepting leaves them
+            // in exactly the inviter's org. createOrganization is injected so
+            // the helper needn't import auth.ts and create a cycle.
+            await assertNotScheduledForDeletion(session.userId);
+            await claimGuestFromCookie(
+              ctx?.request?.headers ?? ctx?.headers,
+              session.userId,
+            );
             const resolved = await resolveSignInHostedOrganization(
               session.userId,
               (body) => auth.api.createOrganization({ body }),
