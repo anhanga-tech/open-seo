@@ -3,7 +3,7 @@ import {
   getUsageCreditsRemaining,
 } from "@/server/billing/subscription";
 import { mcpResponse } from "@/server/mcp/formatters";
-import { buildGuestClaimUrl } from "@/server/mcp/urls";
+import { buildGuestSignUpUrl, GUEST_SIGN_UP_NOTE } from "@/server/mcp/urls";
 import { type ToolContext } from "@/server/mcp/context";
 import {
   isEveryAppServerAuthMode,
@@ -17,7 +17,7 @@ export const whoamiTool = {
   config: {
     title: "Who am I",
     description:
-      "Confirms the connected OpenSEO account, server mode, token scopes, and current credit balance when the user asks to check their account or connection. Initializes billing for new hosted accounts. Uses no credits — does not call DataForSEO. Returns creditsRemaining: null when the balance is unavailable.",
+      "Show the connected OpenSEO account, server mode, token scopes, and remaining credits. Use it when the user asks to check their account, connection, or credit balance. Sets up billing on a new hosted account's first call. Uses no credits.",
     inputSchema: {} as Record<string, never>,
     outputSchema: z.looseObject({
       userEmail: z.string(),
@@ -71,7 +71,7 @@ export const whoamiTool = {
     }
     if (auth.guestClaimToken) {
       lines.push(
-        `Guest account: the user connected without signing up. To add credits, connect Google Search Console or Google Analytics, or use the OpenSEO web app, they need a full account. They can create one, or sign in to an existing one, at ${buildGuestClaimUrl(auth.baseUrl, auth.guestClaimToken)}. Their projects move to that account, and afterwards they reconnect OpenSEO in this app.`,
+        `Guest account: the user connected without signing up. To add credits, connect Google Search Console or Google Analytics, or use the OpenSEO web app, they need a full account. They can create one, or sign in to an existing one, at ${buildGuestSignUpUrl(auth.baseUrl)}. ${GUEST_SIGN_UP_NOTE}`,
       );
     }
     return mcpResponse({

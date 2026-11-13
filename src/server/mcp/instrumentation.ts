@@ -16,7 +16,11 @@ import {
 } from "@/server/mcp/context";
 import { incrementSelfHostMcpToolCallCount } from "@/server/lib/self-host-telemetry";
 import { toolErrorMessage } from "@/server/mcp/tool-error-message";
-import { buildDashboardUrl, buildGuestClaimUrl } from "@/server/mcp/urls";
+import {
+  buildDashboardUrl,
+  buildGuestSignUpUrl,
+  GUEST_SIGN_UP_NOTE,
+} from "@/server/mcp/urls";
 import { BILLING_ROUTE } from "@/shared/billing";
 
 type ToolHandler<TArgs> = (
@@ -270,10 +274,11 @@ export function instrumentMcpToolHandler<TArgs>(
 }
 
 // The agent sees only the error message, and a bare INSUFFICIENT_CREDITS code
-// gives it nothing to tell the user, so it tends to retry. Explain it instead,
-// with a plain billing link and no upgrade or purchase pitch (directory
-// policies ban promotional content). A provider outage gets the same note as
-// per-item tool errors; every other error passes through unchanged.
+// or paid-plan refusal gives it nothing to tell the user, so it tends to
+// retry. Explain it instead, with a plain billing link and no upgrade or
+// purchase pitch (directory policies ban promotional content). A provider
+// outage gets the same note as per-item tool errors; every other error passes
+// through unchanged.
 function agentFacingError(
   error: unknown,
   appError: AppError | null,
@@ -281,6 +286,15 @@ function agentFacingError(
 ): unknown {
   if (appError?.code === "UPSTREAM_UNAVAILABLE")
     return new AppError("UPSTREAM_UNAVAILABLE", toolErrorMessage(appError));
+  if (appError?.code === "PAYMENT_REQUIRED" && !auth.guestClaimToken) {
+    const message = /[.!?]$/.test(appError.message)
+      ? appError.message
+      : `${appError.message}.`;
+    return new AppError(
+      "PAYMENT_REQUIRED",
+      `${message} Retrying won't help. The organization owner can manage the plan at ${buildDashboardUrl(auth.baseUrl, BILLING_ROUTE)}`,
+    );
+  }
   if (appError?.code !== "INSUFFICIENT_CREDITS") return error;
   const detail =
     appError.message === appError.code ? "" : `${appError.message} `;
@@ -289,7 +303,7 @@ function agentFacingError(
   if (auth.guestClaimToken) {
     return new AppError(
       "INSUFFICIENT_CREDITS",
-      `${detail}This guest OpenSEO account has used its free credits. Retrying won't help. To add credits, the user needs a full OpenSEO account: they can create one, or sign in to an existing one, at ${buildGuestClaimUrl(auth.baseUrl, auth.guestClaimToken, BILLING_ROUTE)}. Their projects move to that account, and afterwards they reconnect OpenSEO in this app.`,
+      `${detail}This guest OpenSEO account has used its free credits. Retrying won't help. To add credits, the user needs a full OpenSEO account: they can create one, or sign in to an existing one, at ${buildGuestSignUpUrl(auth.baseUrl, BILLING_ROUTE)}. ${GUEST_SIGN_UP_NOTE}`,
     );
   }
   return new AppError(

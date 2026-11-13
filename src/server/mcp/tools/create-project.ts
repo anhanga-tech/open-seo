@@ -45,7 +45,7 @@ export const createProjectTool = {
   config: {
     title: "Create project",
     description:
-      "Create a new project in the user's organization. Uses no credits — does not call DataForSEO. Provide a name, and optionally a domain and default market (locationCode/languageCode; a languageCode requires a locationCode). Returns the created {id, name, domain, locationCode, languageCode, url}; pass the returned `id` as `projectId` to other OpenSEO tools. Call list_projects first to avoid creating a duplicate.",
+      "Create a project in the user's organization. Provide a name, and optionally a domain and a default market (locationCode and languageCode; a languageCode requires a locationCode). Pass the returned id as projectId to other OpenSEO tools. Uses no credits. Call list_projects first to avoid creating a duplicate.",
     inputSchema,
     outputSchema: z.looseObject({
       project: z
@@ -103,7 +103,7 @@ export const createProjectTool = {
     // client alone doesn't mean hosted, because password self-hosts have them.
     if (isHostedMcpClient(auth) && (await isHostedServerAuthMode())) {
       lines.push(
-        `Search Console isn't connected to this project yet. Offer the user this link to connect it, so you can use the site's real Google data: ${buildConnectGscUrl(baseUrl, project.id, auth.guestClaimToken)}`,
+        `Search Console isn't connected to this project yet. Offer the user this link to connect it, so you can use the site's real Google data: ${buildConnectGscUrl(baseUrl, project.id, Boolean(auth.guestClaimToken))}`,
       );
     }
     return mcpResponse({
