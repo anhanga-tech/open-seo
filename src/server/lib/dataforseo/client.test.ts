@@ -88,7 +88,8 @@ vi.mock("@/server/lib/dataforseo/labs", () => ({
   fetchSerpCompetitors: vi.fn(),
 }));
 vi.mock("@/server/lib/dataforseo/serp", () => ({
-  fetchLiveSerp: vi.fn(),
+  postSerpReadTasks: vi.fn(),
+  SERP_READS_PER_QUERY: 3,
   postRankCheckTasks: vi.fn(),
   fetchLocalSerp: vi.fn(),
   postLocalSerpTasks: vi.fn(),
@@ -134,11 +135,12 @@ vi.mock("@/server/lib/dataforseo/ai-tracking", () => ({
 
 import { waitUntil } from "cloudflare:workers";
 import { createDataforseoClient } from "@/server/lib/dataforseo/client";
+import { withDataforseoSlots } from "@/server/lib/dataforseo/request-slots";
 import { dataforseoPricing } from "@/server/lib/dataforseo/pricing";
 import { DataforseoChargedTaskError } from "@/server/lib/dataforseo/envelope";
 import { AppError } from "@/server/lib/errors";
 import { fetchBacklinksSummary } from "@/server/lib/dataforseo/backlinks";
-import { fetchLiveSerp } from "@/server/lib/dataforseo/serp";
+import { postSerpReadTasks } from "@/server/lib/dataforseo/serp";
 import { postAiTrackingTasks } from "@/server/lib/dataforseo/ai-tracking";
 
 const billingCustomer = {
@@ -231,9 +233,6 @@ describe("meterDataforseoCall", () => {
       // billing page's feature breakdown needs the feature on the hold too.
       properties: { creditFeature: "backlinks" },
     });
-    // The execute + settle chain is registered with the request so a client
-    // disconnect after dispatch cannot skip the deduction.
-    expect(vi.mocked(waitUntil)).toHaveBeenCalledTimes(1);
     expect(finalizeMock).toHaveBeenCalledTimes(1);
     expect(finalizeMock.mock.calls[0][0]).toMatchObject({
       lockId: holdCall.lock?.lockId,
@@ -301,8 +300,61 @@ describe("meterDataforseoCall", () => {
       client.backlinks.summary(backlinksInput),
     ).rejects.toMatchObject({ code: "UPSTREAM_UNAVAILABLE" });
 
-    expect(vi.mocked(waitUntil)).toHaveBeenCalledTimes(1);
     expect(finalizeMock.mock.calls[0][0]).toMatchObject({ action: "release" });
+  });
+
+  it("in a request, returns before the settle and settles one hold at a time after it", async () => {
+    setupHostedMode();
+    mockMonthlyBalance(5000);
+    mockDataforseoResult(RAW_COST);
+    const finishFinalize: Array<() => void> = [];
+    finalizeMock.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          finishFinalize.push(() => resolve({ success: true })),
+        ),
+    );
+
+    const client = createDataforseoClient(billingCustomer);
+    const results = await withDataforseoSlots(() =>
+      Promise.all([
+        client.backlinks.summary(backlinksInput),
+        client.backlinks.summary(backlinksInput),
+      ]),
+    );
+
+    expect(results).toEqual([{ rank: 42 }, { rank: 42 }]);
+    // Registered with the request, so a client disconnect can't skip them.
+    expect(vi.mocked(waitUntil)).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(finalizeMock).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve));
+    expect(finalizeMock).toHaveBeenCalledTimes(1);
+    finishFinalize[0]();
+    await vi.waitFor(() => expect(finalizeMock).toHaveBeenCalledTimes(2));
+    finishFinalize[1]();
+    await Promise.all(vi.mocked(waitUntil).mock.calls.map(([work]) => work));
+  });
+
+  it("outside a request (Workflows), waits for the settle before returning", async () => {
+    setupHostedMode();
+    mockMonthlyBalance(5000);
+    mockDataforseoResult(RAW_COST);
+    const finishFinalize: Array<() => void> = [];
+    finalizeMock.mockReturnValue(
+      new Promise((resolve) =>
+        finishFinalize.push(() => resolve({ success: true })),
+      ),
+    );
+
+    let returned = false;
+    const call = createDataforseoClient(billingCustomer)
+      .backlinks.summary(backlinksInput)
+      .then(() => (returned = true));
+    await vi.waitFor(() => expect(finalizeMock).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve));
+    expect(returned).toBe(false);
+    finishFinalize[0]();
+    await call;
   });
 });
 
@@ -363,7 +415,7 @@ describe("AI visibility queued posts", () => {
   });
 });
 
-describe("liveBatch", () => {
+describe("readsTaskPostBatch", () => {
   const input = {
     keyword: "running shoes",
     locationCode: 2840,
@@ -372,22 +424,22 @@ describe("liveBatch", () => {
     depth: 10,
   };
   const callEstimate = creditsForProviderUsd(
-    dataforseoPricing.serp.live(input),
+    dataforseoPricing.serp.readsTaskPost(input),
   );
   // 2 * ceil(1.28) = 4 credits for two calls, not ceil(2.56) = 3 for their
   // summed cost: each call is credited as it would be unbatched.
   const billed = {
-    data: [],
+    data: ["task-1", "task-2", "task-3"],
     billing: {
       costUsd: 0.001,
-      path: ["v3", "serp", "google", "organic", "live", "advanced"],
+      path: ["v3", "serp", "google", "organic", "task_post"],
     },
   };
 
   it("bills the batch with one hold on the summed estimate and one confirm on the billed calls", async () => {
     setupHostedMode();
     mockMonthlyBalance(5000);
-    vi.mocked(fetchLiveSerp)
+    vi.mocked(postSerpReadTasks)
       .mockResolvedValueOnce(billed)
       .mockRejectedValueOnce(
         new AppError("UPSTREAM_UNAVAILABLE", "DataForSEO timed out"),
@@ -395,7 +447,7 @@ describe("liveBatch", () => {
       .mockResolvedValueOnce(billed);
 
     const client = createDataforseoClient(billingCustomer);
-    const settled = await client.serp.liveBatch([input, input, input]);
+    const settled = await client.serp.readsTaskPostBatch([input, input, input]);
 
     expect(settled.map((outcome) => outcome.status)).toEqual([
       "fulfilled",
@@ -426,10 +478,10 @@ describe("liveBatch", () => {
         balance: { remaining: balance },
       };
     });
-    vi.mocked(fetchLiveSerp).mockResolvedValue(billed);
+    vi.mocked(postSerpReadTasks).mockResolvedValue(billed);
 
     const client = createDataforseoClient(billingCustomer);
-    const settled = await client.serp.liveBatch([input, input, input]);
+    const settled = await client.serp.readsTaskPostBatch([input, input, input]);
 
     expect(settled.every((outcome) => outcome.status === "fulfilled")).toBe(
       true,

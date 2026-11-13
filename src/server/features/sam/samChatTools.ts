@@ -36,6 +36,7 @@ import { searchSerpLocationsTool } from "@/server/mcp/tools/search-serp-location
 import { getSerpResultsTool } from "@/server/mcp/tools/get-serp-results";
 import {
   getAuditIssuesTool,
+  getAuditLighthouseTool,
   getAuditPagesTool,
   getAuditStatusTool,
   runSiteAuditTool,
@@ -70,6 +71,7 @@ import {
   getLocalRankGridTool,
   listBusinessCategoriesTool,
 } from "@/server/mcp/tools/local-seo-tools";
+import { getSuggestedKeywordsTool } from "@/server/mcp/tools/get-suggested-keywords";
 import { researchKeywordsTool } from "@/server/mcp/tools/research-keywords";
 import { saveKeywordsTool } from "@/server/mcp/tools/save-keywords";
 import {
@@ -384,6 +386,7 @@ export function buildSamMcpTools(
     update_project_context: adaptTool(buildUpdateProjectContextTool("sam")),
     list_saved_keywords: adaptTool(listSavedKeywordsTool),
     remove_saved_keywords: adaptTool(removeSavedKeywordsTool),
+    get_suggested_keywords: adaptTool(getSuggestedKeywordsTool),
     research_keywords: adaptTool(researchKeywordsTool),
     save_keywords: adaptTool(saveKeywordsTool),
     get_domain_overview: adaptTool(getDomainOverviewTool),
@@ -417,7 +420,7 @@ export function buildSamMcpTools(
     run_rank_tracker: adaptTool(runRankTrackerTool),
     get_ranked_keywords: adaptTool(getRankedKeywordsTool),
     find_serp_competitors: adaptTool(findSerpCompetitorsTool),
-    search_local_businesses: adaptTool(searchLocalBusinessesTool),
+    search_local_businesses: adaptObjectTool(searchLocalBusinessesTool),
     get_local_serp_results: adaptTool(getLocalSerpResultsTool),
     get_google_business_questions: adaptTool(getGoogleBusinessQuestionsTool),
     get_business_profile: adaptTool(getBusinessProfileTool),
@@ -462,5 +465,6 @@ export function buildSamMcpTools(
     get_audit_status: waitingAuditStatusTool(adaptTool),
     get_audit_issues: adaptTool(getAuditIssuesTool),
     get_audit_pages: adaptTool(getAuditPagesTool),
+    get_audit_lighthouse: adaptTool(getAuditLighthouseTool),
   };
 }

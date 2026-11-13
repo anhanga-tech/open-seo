@@ -11,6 +11,7 @@ import {
   fetchLiveSerp,
   fetchLocalSerpTaskResult,
   fetchRankCheckTaskResult,
+  fetchSerpTaskResult,
   postLocalSerpTasks,
   postRankCheckTasks,
 } from "@/server/lib/dataforseo/serp";
@@ -109,11 +110,13 @@ describe("rank check task queue", () => {
       ),
     ).toEqual(["https://api.dataforseo.com/v3/serp/google/organic/task_post"]);
 
-    // DataForSEO leaves most results wrapped in google.com/goto on tasks that
-    // set stop_crawl_on_match, so no posted task may ask for it.
+    // DataForSEO rejects tasks carrying stop_crawl_on_match or its related
+    // parameters from November 23, 2026.
     expect(
       JSON.stringify(parseDataforseoRequestBody(fetchMock.mock.calls[0]?.[1])),
-    ).not.toContain("stop_crawl_on_match");
+    ).not.toMatch(
+      /stop_crawl_on_match|target_search_mode|find_targets_in|ignore_targets_in/,
+    );
     expect(result.data).toEqual([
       {
         keyword: "alpha",
@@ -378,5 +381,23 @@ describe("Maps task queue", () => {
       status: "completed",
       items: [],
     });
+  });
+});
+
+describe("fetchSerpTaskResult", () => {
+  it("stops waiting on a poll when its signal fires", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Timed out", "TimeoutError"));
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchSerpTaskResult("read-1", AbortSignal.timeout(1)),
+    ).rejects.toMatchObject({ code: "UPSTREAM_UNAVAILABLE" });
   });
 });

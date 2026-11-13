@@ -1,18 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { hasPaidPlanMock, workflowCreateMock, captureEventMock } = vi.hoisted(
-  () => ({
-    hasPaidPlanMock: vi.fn(),
-    workflowCreateMock:
-      vi.fn<
-        (options: { params: { config: { maxPages: number } } }) => Promise<void>
-      >(),
-    captureEventMock:
-      vi.fn<
-        (event: { properties: Record<string, unknown> }) => Promise<void>
-      >(),
-  }),
-);
+const {
+  hasPaidPlanMock,
+  workflowCreateMock,
+  captureEventMock,
+  latestAuditMock,
+  issueGroupsMock,
+  listIssuesMock,
+  lighthouseResultsMock,
+} = vi.hoisted(() => ({
+  hasPaidPlanMock: vi.fn(),
+  workflowCreateMock:
+    vi.fn<
+      (options: { params: { config: { maxPages: number } } }) => Promise<void>
+    >(),
+  captureEventMock:
+    vi.fn<(event: { properties: Record<string, unknown> }) => Promise<void>>(),
+  latestAuditMock: vi.fn(),
+  issueGroupsMock: vi.fn(),
+  listIssuesMock: vi.fn(),
+  lighthouseResultsMock: vi.fn(),
+}));
 
 vi.mock("cloudflare:workers", () => ({
   env: { SITE_AUDIT_WORKFLOW: { create: workflowCreateMock } },
@@ -42,7 +50,33 @@ vi.mock("@/server/features/audit/repositories/AuditRepository", () => ({
     getAuditUsageForOrganization: vi
       .fn()
       .mockResolvedValue({ runningCount: 1, capacityUnits: 0 }),
+    getLatestAuditForProject: latestAuditMock,
   },
+}));
+vi.mock("@/server/features/audit/repositories/auditResultsQueries", () => ({
+  getAuditIssueGroups: issueGroupsMock,
+  listAuditIssues: listIssuesMock,
+  listAuditLighthouseResults: lighthouseResultsMock,
+  listAuditPages: vi.fn(),
+}));
+// A stored report is named by its key, so a test can tell which one was read.
+vi.mock("@/server/lib/r2", () => ({
+  getJsonFromR2: async (key: string) => key,
+}));
+vi.mock("@/server/lib/lighthousePayload", () => ({
+  readStoredLighthousePayload: (report: string) => ({
+    report: {
+      hasIssueDetails: true,
+      issues: [
+        {
+          severity: "critical",
+          title: `Issue in ${report}`,
+          category: "performance",
+          items: [],
+        },
+      ],
+    },
+  }),
 }));
 vi.mock(
   "@/server/features/audit/repositories/CrawlerCredentialRepository",
@@ -57,7 +91,11 @@ vi.mock("@/server/features/audit/AuditScratchpad", () => ({
 }));
 vi.mock("@/server/lib/audit/progress-kv", () => ({ AuditProgressKV: {} }));
 
-import { runSiteAuditTool } from "@/server/mcp/tools/site-audit-tools";
+import {
+  getAuditIssuesTool,
+  getAuditLighthouseTool,
+  runSiteAuditTool,
+} from "@/server/mcp/tools/site-audit-tools";
 import {
   makeToolContext,
   textContent,
@@ -110,5 +148,96 @@ describe("run_site_audit page budget", () => {
       500,
     );
     expect(textContent(result)).not.toContain("limited to");
+  });
+});
+
+describe("get_audit_issues", () => {
+  beforeEach(() => {
+    latestAuditMock.mockResolvedValue({
+      id: "audit-1",
+      startUrl: "https://example.com",
+      status: "failed",
+      pagesCrawled: 0,
+    });
+    issueGroupsMock.mockResolvedValue([]);
+    listIssuesMock.mockResolvedValue([]);
+  });
+
+  it("doesn't report an audit that failed before crawling as clean", async () => {
+    const result = await getAuditIssuesTool.handler(
+      { projectId: "project-1" },
+      makeToolContext(),
+    );
+
+    expect(textContent(result)).toContain("failed before crawling any pages");
+    expect(textContent(result)).not.toContain("found no issues");
+  });
+
+  it("counts every matching issue and points to the next page", async () => {
+    latestAuditMock.mockResolvedValue({
+      id: "audit-1",
+      startUrl: "https://example.com",
+      status: "completed",
+      pagesCrawled: 500,
+    });
+    issueGroupsMock.mockResolvedValue([
+      { issueType: "thin-content", severity: "warning", count: 450 },
+    ]);
+    listIssuesMock.mockResolvedValue([
+      {
+        id: "issue-1",
+        pageUrl: "https://example.com/a",
+        issueType: "thin-content",
+        severity: "warning",
+        detailsJson: null,
+      },
+    ]);
+
+    const result = await getAuditIssuesTool.handler(
+      { projectId: "project-1", limit: 1 },
+      makeToolContext(),
+    );
+
+    expect(textContent(result)).toContain("450 issues");
+    expect(textContent(result)).toContain("call again with page 2");
+  });
+});
+
+describe("get_audit_lighthouse", () => {
+  beforeEach(() => {
+    latestAuditMock.mockResolvedValue({
+      id: "audit-1",
+      startUrl: "https://example.com",
+      lighthouseTotal: 2,
+    });
+    lighthouseResultsMock.mockResolvedValue(
+      (["desktop", "mobile"] as const).map((strategy) => ({
+        pageUrl: "https://example.com/",
+        strategy,
+        r2Key: `${strategy}-report`,
+      })),
+    );
+  });
+
+  it("says an audit ran without Lighthouse instead of returning nothing", async () => {
+    latestAuditMock.mockResolvedValue({ id: "audit-1", lighthouseTotal: 0 });
+    lighthouseResultsMock.mockResolvedValue([]);
+
+    const result = await getAuditLighthouseTool.handler(
+      { projectId: "project-1" },
+      makeToolContext(),
+    );
+
+    expect(textContent(result)).toContain("ran without Lighthouse");
+  });
+
+  it("lists a page's mobile issues unless another device is asked for", async () => {
+    const result = await getAuditLighthouseTool.handler(
+      { projectId: "project-1", url: "https://example.com/" },
+      makeToolContext(),
+    );
+
+    expect(textContent(result)).toContain("Issue in mobile-report");
+    expect(textContent(result)).not.toContain("desktop-report");
   });
 });
