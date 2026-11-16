@@ -161,4 +161,10 @@
       "binding": "R2",
     },
   ],
+  // Fork-local: tells the app the audit worker binds Browser Run
+  // (wrangler.audit.jsonc), so it offers "Render JavaScript". Keep both on
+  // upstream syncs.
+  "vars": {
+    "AUDIT_BROWSER_RENDERING": "true",
+  },
 }
