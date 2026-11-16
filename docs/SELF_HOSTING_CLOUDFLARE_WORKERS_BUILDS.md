@@ -97,9 +97,11 @@ resources (the `-anhanga` suffix); upstream's copy points at resources in an
 account we do not own. Keep that edit — deploying with upstream's ids either
 fails or targets the wrong place.
 
-Secrets are not in the repo and `wrangler deploy` preserves them. The six on the
-Worker (`BETTER_AUTH_SECRET`, `DATAFORSEO_API_KEY`, `GOOGLE_CLIENT_ID`,
-`GOOGLE_CLIENT_SECRET`, `POLICY_AUD`, `TEAM_DOMAIN`) survive every deploy.
+Secrets are not in the repo and `wrangler deploy` preserves them. The seven on
+the Worker (`BETTER_AUTH_SECRET`, `DATAFORSEO_API_KEY`, `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, `GOOGLE_MAPS_API_KEY`, `POLICY_AUD`, `TEAM_DOMAIN`)
+survive every deploy. `GOOGLE_MAPS_API_KEY` draws the Local SEO basemap; see
+[Google Maps setup](./GOOGLE_MAPS_SETUP.md).
 
 ## Where the app is served
 
@@ -117,18 +119,24 @@ Neither appears in `wrangler.jsonc`: there is no `routes` block and no
 domain that is currently working.
 
 Both hostnames sit behind the same Cloudflare Access application
-(`anhanga.cloudflareaccess.com`). An unauthenticated request to either returns a
-302 to the Access login, so neither is a way around the other.
+(`anhanga.cloudflareaccess.com`). An unauthenticated browser request to either
+returns a 302 to the Access login, so neither is a way around the other.
 
 After a deploy, confirming the Custom Domain still answers is one command:
 
 ```bash
-curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" https://seo.anhanga.tech/
+curl -s -o /dev/null -H 'Accept: text/html' -A 'Mozilla/5.0' \
+  -w "%{http_code} %{redirect_url}\n" https://seo.anhanga.tech/
 ```
 
 A `302` pointing at `anhanga.cloudflareaccess.com` is the healthy answer — the
 Worker is up and Access is enforcing. A `200` would mean Access is not in front
 of it.
+
+Keep the two headers. Without them Access treats the request as an API client
+and answers `401` with a `WWW-Authenticate: Bearer` header naming
+`/.well-known/cloudflare-access-protected-resource/`. That 401 also comes from
+Access, not from the Worker, so on its own it does not mean the deploy broke.
 
 ## Updating from upstream
 
