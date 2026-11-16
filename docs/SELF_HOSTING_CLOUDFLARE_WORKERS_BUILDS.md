@@ -171,6 +171,15 @@ diverges:
 On a `wrangler.jsonc` or `wrangler.audit.jsonc` conflict, keep this account's resource ids (the
 `-anhanga` ones) and take upstream's other changes.
 
+Also keep the two fork-local keys at the end of those files, which turn on
+JavaScript rendering for site audits the way the Alchemy deploy does: the
+`browser` binding (`BROWSER`, Cloudflare Browser Run) in `wrangler.audit.jsonc`
+and `AUDIT_BROWSER_RENDERING: "true"` under `vars` in `wrangler.jsonc`. Keep
+them together. The var alone makes the app offer "Render JavaScript" with no
+browser behind it. Browser Run needs the Workers Paid plan: Free allows one
+browser action every ten seconds, too slow for a crawl. Paid includes 10
+browser hours a month, then bills per hour.
+
 Do not re-add a fork-local version bump or a `release-notes/vX.Y.Z.md`. Both
 collide with upstream on every release — that is why the fork-local v0.1.3 was
 reverted.

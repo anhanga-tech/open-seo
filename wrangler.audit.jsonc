@@ -80,4 +80,10 @@
       "binding": "R2",
     },
   ],
+  // Fork-local: Cloudflare Browser Run for the site audit "Render JavaScript"
+  // option, as the Alchemy deploy binds it. Ships together with
+  // AUDIT_BROWSER_RENDERING in wrangler.jsonc. Keep both on upstream syncs.
+  "browser": {
+    "binding": "BROWSER",
+  },
 }
